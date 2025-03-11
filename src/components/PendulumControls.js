@@ -113,13 +113,12 @@ const PendulumControls = ({ params, onParamChange, paused, onTogglePause, onRese
       </div>
       
       <div className="pendulum-info">
-        <h4>About Double Integrator</h4>
+        <h4>About Pendulum Dynamics</h4>
         <p>
-          A double integrator calculates position by integrating velocity, 
-          which is itself calculated by integrating acceleration.
+          This simulation models a simple pendulum with damping under the influence of gravity.
         </p>
         <p>
-          For a pendulum, the equation of motion is:
+          The pendulum's motion is governed by the equation:
           <br />
           α = -g/L × sin(θ) - b×ω
         </p>

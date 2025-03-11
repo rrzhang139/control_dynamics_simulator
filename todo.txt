@@ -1,1 +1,15 @@
+03.09.2025
+- 
+
+03.10.2025
+- injecting control gravity to invert the gravitational force seems to help when its close to goal position
+- failed to get LQR working on acrobot balancing
+- 
+
+
+NEXT FEATURES:
 - create new integrator
+
+
+TIPS:
+- If facing issues, decrease dt so you can visualize slow motion movement
