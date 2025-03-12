@@ -16,7 +16,9 @@ L2 = 0.5    # Link length
 b = 0.5    # Damping coefficient
 
 # Control gains
-k = 1.0
+k1 = 1.0
+k2 = 1.0
+k3 = 1.0
 
 E_desired = m1*g*L1 + m2*g*L2
 target_theta = np.pi
@@ -95,10 +97,10 @@ def update(frame):
     global theta1, theta2, omega1, omega2
     
     # WONT WORK. 
-    u = energy_controller_acrobat(m1, m2, L1, L2, omega1, omega2, g, theta1, theta2, E_desired, k)
+    u = energy_controller_acrobat(m1, m2, L1, L2, omega1, omega2, g, theta1, theta2, E_desired, [k1,k2,k3])
     
     state = np.array([theta1, theta2, omega1, omega2])
-    new_state = rk4_step(acrobot_dynamics, 0, state, u, dt)
+    new_state = state + np.array(acrobot_dynamics(0, state, u)) * dt
     
     theta1, theta2, omega1, omega2 = new_state
     
@@ -110,10 +112,17 @@ def update(frame):
     y2 = y1 - L2 * np.cos(theta1 + theta2)
     
     # Update visualization
-    joint1.set_data(x1, y1)
-    joint2.set_data(x2, y2)
-    rod1.set_data([0, x1], [0, y1])
-    rod2.set_data([x1, x2], [y1, y2])
+    if np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2):
+        joint1.set_data([x1], [y1])
+        joint2.set_data([x2], [y2])
+        rod1.set_data([0, x1], [0, y1])
+        rod2.set_data([x1, x2], [y1, y2])
+    else:
+        # If values are invalid, use empty sequences
+        joint1.set_data([], [])
+        joint2.set_data([], [])
+        rod1.set_data([], [])
+        rod2.set_data([], [])
     
     return joint1, joint2, rod1, rod2
 

@@ -1,178 +1,160 @@
-import scipy
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from controllers import basic_controller, energy_controller_acrobat
-from integrators import rk4_step
-from pydrake.all import LinearQuadraticRegulator
+from controllers import acrobot_linearized_matrices, lqr_solve, acrobot_lqr_controller
 
-# Constants
-dt = 0.0001  # Time step
-T = 10     # Total simulation time
-m1 = 1.0   # Mass of first link
-m2 = 1.0   # Mass of second link
-I1 = 1
-I2 = 1
-g = 9.8    # Gravity constant
-L1 = 0.5    # Link length
-L2 = 0.5    # Link length
-b = 0.0    # Damping coefficient
+###############################################################################
+#                        PARAMETERS AND CONSTANTS                             #
+###############################################################################
+# Simulation parameters
+dt = 0.01     # Time step
+T  = 10.0     # Total simulation time
 
-# Control gains
-k = 10.0
+# Physical parameters for the Acrobot
+m1 = 1.0      # Mass of link 1
+m2 = 1.0      # Mass of link 2
+I1 = 1.0      # Moment of inertia for link 1
+I2 = 1.0      # Moment of inertia for link 2
+L1 = 0.5      # Length of link 1
+L2 = 0.5      # Length of link 2
+g  = 9.8      # Gravity
 
-E_desired = m1*g*L1 + m2*g*L2
-target_theta = np.pi
-
-# Initial conditions
-theta1 = np.pi + 0.05
-theta2 = -0.1
-omega1 = 0.0
-omega2 = 0.0
-alpha1 = 0.0
-alpha2 = 0.0
-
-# Control
-u = 0
+# Torque limit at the second joint
 torque_limit = 1.0
 
-# Setup animation
+# Initial conditions (slightly perturbed from the upright equilibrium)
+# The equilibrium of interest is: theta1 = pi, theta2 = 0, angular velocities = 0
+theta1_0  = np.pi + 0.01
+theta2_0  = -0.0
+omega1_0  = 0.0
+omega2_0  = 0.0
+
+###############################################################################
+#                      DYNAMICS FUNCTION                                      #
+###############################################################################
+def acrobot_dynamics(t, state, u):
+    """
+    Compute the full nonlinear dynamics of the Acrobot (manipulator form).
+    
+    state = [theta1, theta2, omega1, omega2]
+    u     = scalar torque (applied at the second joint)
+    """
+    theta1, theta2, omega1, omega2 = state
+    
+    # Mass-Inertia Matrix M(q)
+    M11 = I1 + I2 + m2*L1**2 + 2*m2*L1*L2*np.cos(theta2)
+    M12 = I2 + m2*L1*L2*np.cos(theta2)
+    M21 = I2 + m2*L1*L2*np.cos(theta2)
+    M22 = I2
+    M = np.array([[M11, M12],
+                  [M21, M22]])
+    
+    # Coriolis/centrifugal terms C(q, qdot)*qdot
+    # For the Acrobot:
+    #   C1 = -m2 * L1 * L2 * sin(theta2) * (2*omega1*omega2 + omega2^2)
+    #   C2 =  m2 * L1 * L2 * sin(theta2) * omega1^2
+    C1 = -m2*L1*L2*np.sin(theta2)* (2*omega1*omega2 + omega2**2)
+    C2 =  m2*L1*L2*np.sin(theta2)* (omega1**2)
+    Cvec = np.array([C1, C2])
+    
+    # Gravity terms tau_g(q)
+    #   G1 = (m1+m2)*g*L1*sin(theta1) + m2*g*L2*sin(theta1 + theta2)
+    #   G2 = m2*g*L2*sin(theta1 + theta2)
+    G1 = (m1 + m2)*g*L1*np.sin(theta1) + m2*g*L2*np.sin(theta1 + theta2)
+    G2 = m2*g*L2*np.sin(theta1 + theta2)
+    Gvec = np.array([G1, G2])
+    
+    # Control input is applied only at joint 2
+    # B = [0; 1], so the torque vector is [0, u]^T
+    # Clip to torque limits
+    u_clamped = np.clip(u, -torque_limit, torque_limit)
+    Bvec = np.array([0.0, 1.0]) * u_clamped
+    
+    # Solve for angular accelerations = M^{-1} (B*u - C - G)
+    accels = np.linalg.solve(M, Bvec - Cvec - Gvec)
+    
+    # Return the state derivatives
+    return np.array([omega1, omega2, accels[0], accels[1]])
+
+###############################################################################
+#                          SETUP LQR CONTROLLER                               #
+###############################################################################
+# Get linearization around the upright equilibrium
+A_lin, B_lin = acrobot_linearized_matrices(m1, m2, I1, I2, L1, L2, g)
+
+# Define cost matrices: you can tune these to emphasize different states
+Q = np.diag([10.0, 10.0, 1.0, 1.0]) 
+R = np.array([[1.0]])
+
+# Compute LQR gains
+K_lqr, S_lqr = lqr_solve(A_lin, B_lin, Q, R)
+
+print("Linearized A:\n", A_lin)
+print("Linearized B:\n", B_lin)
+print("LQR Gain K:\n", K_lqr)
+
+
+###############################################################################
+#                           SIMULATION / ANIMATION                            #
+###############################################################################
+# Prepare for simulation
+num_steps = int(T / dt)
+state = np.array([theta1_0, theta2_0, omega1_0, omega2_0])
+reference_state = np.array([np.pi, 0.0, 0.0, 0.0])  # Upright equilibrium
+
+# Set up figure for animation
 fig, ax = plt.subplots()
 ax.set_xlim(-1.5, 1.5)
 ax.set_ylim(-1.5, 1.5)
+ax.set_aspect('equal')
+ax.set_title("Acrobot Balancing with LQR")
 
-# Acrobat representation
-joint1, = plt.plot([], [], 'bo', markersize=10)  # First joint
-joint2, = plt.plot([], [], 'ro', markersize=10)  # Second joint
-rod1, = plt.plot([], [], 'k-', lw=2)  # First rod
-rod2, = plt.plot([], [], 'k-', lw=2)  # Second rod
+# Plot elements
+joint1, = ax.plot([], [], 'bo', markersize=8)   # First joint
+joint2, = ax.plot([], [], 'ro', markersize=8)   # Second joint
+rod1,   = ax.plot([], [], 'k-', lw=2)
+rod2,   = ax.plot([], [], 'k-', lw=2)
 
-def init():
-    """ Initialize animation """
+def init_anim():
     joint1.set_data([], [])
     joint2.set_data([], [])
     rod1.set_data([], [])
     rod2.set_data([], [])
     return joint1, joint2, rod1, rod2
 
-def linearized_matrices():
-    """ Computes the linearized A, B matrices for the Acrobot around the upright position. """
+def update_anim(frame):
+    """
+    Single time-step update for the animation.
+    Applies the LQR torque and integrates one step.
+    """
+    global state
     
-    # Mass-Inertia Matrix
-    M11 = I1 + I2 + m2 * L1**2 + 2 * m2 * L1 * L2 * np.cos(theta2)
-    M12 = I2 + m2 * L1 * L2 * np.cos(theta2)
-    M21 = I2 + m2 * L1 * L2 * np.cos(theta2)
-    M22 = I2
-    M = np.array([[M11, M12], [M21, M22]])
+    # Apply LQR control using our controller module
+    u = acrobot_lqr_controller(state, reference_state, K_lqr)
     
-    # Gravity Term (Linearized around upright)
-    # Gravity gradient matrix (partial derivative of gravity torque with respect to q)
-    # Linearized around the upright equilibrium point (theta1 = pi, theta2 = 0)
-    dG_dq = np.array([
-        [g * (m1 * L1 + m2 * L1 + m2 * L2), m2 * g * L2],
-        [m2 * g * L2, m2 * g * L2]
-    ])
-    
-    # Compute A matrix in block form: [0 I; M^-1 * dG_dq 0]
-    # Note: B(q) is constant for Acrobot, so partial derivative terms drop out
-    # Also, C terms drop out since velocity is zero at the equilibrium point
-    A_top = np.block([np.zeros((2, 2)), np.eye(2)])
-    A_bottom = np.block([np.linalg.inv(M) @ dG_dq, np.zeros((2, 2))])
-    A = np.vstack((A_top, A_bottom))
+    # Integrate one step
+    xdot = acrobot_dynamics(0, state, u)
+    state = state + xdot*dt
 
-    # Compute B matrix in block form: [0; M^-1 * B]
-    # Where B = [0; 1] for Acrobot (actuation only at second joint)
-    B = np.vstack((
-        np.zeros((2, 1)),
-        np.linalg.inv(M) @ np.array([[0], [1]])
-    ))
+    # Unpack new state
+    theta1, theta2, _, _ = state
 
-    return A, B
-
-def acrobot_dynamics(t, state, u):
-    """ Computes the equations of motion for the Acrobot. """
-    theta1, theta2, ang_vel1, ang_vel2 = state
-    
-    # Mass-Inertia Matrix
-    M11 = I1 + I2 + m2 * L1**2 + 2 * m2 * L1 * L2 * np.cos(theta2)
-    M12 = I2 + m2 * L1 * L2 * np.cos(theta2)
-    M21 = I2 + m2 * L1 * L2 * np.cos(theta2)
-    M22 = I2
-    M = np.array([[M11, M12], [M21, M22]])
-
-    # Coriolis & Centrifugal Forces
-    C1 = -m2 * L1 * L2 * np.sin(theta2) * ang_vel2 * (2 * ang_vel1 + ang_vel2)
-    C2 = m2 * L1 * L2 * np.sin(theta2) * ang_vel1**2
-    C = np.array([C1, C2])
-
-    # Gravity Terms
-    G1 = (m1 + m2) * g * L1 * np.sin(theta1) + m2 * g * L2 * np.sin(theta1 + theta2)
-    G2 = m2 * g * L2 * np.sin(theta1 + theta2)
-    G = np.array([G1, G2])
-
-    # Control Input (Actuator only at joint 2)
-    B = np.array([0, 1])
-    u = np.clip(u, -torque_limit, torque_limit)  # Apply torque limits
-
-    # Solve for angular accelerations
-    accels = np.linalg.solve(M, B * u - C - G)
-    
-    return [ang_vel1, ang_vel2, accels[0], accels[1]]
-
-def lqr(A, B, Q, R):
-    """ Solves the Riccati equation and computes the LQR gain K. """
-    print(A.shape, B.shape)
-    S = scipy.linalg.solve_continuous_are(A, B, Q, R)
-    K = np.linalg.inv(R) @ B.T @ S
-    return K, S
-
-# Define Cost Matrices
-Q = np.diag([10, 10, 1, 1])  # Penalize state deviations
-R = np.array([[1]])  # Penalize control effort
-A, B = linearized_matrices()
-print(A, B)
-K, S = LinearQuadraticRegulator(A, B, Q, R) #lqr(A, B, Q, R)
-print(K, S)
-
-def update(frame):
-    """ Update the animation for each frame """
-    global theta1, theta2, omega1, omega2
-    
-    x = np.array([theta1, theta2, omega1, omega2])
-    
-    # WILL WORK
-    u = -K @ x
-    
-    # WONT WORK. 
-    # u = energy_controller_acrobat(m1, m2, L1, L2, omega1, omega2, g, theta1, theta2, E_desired, k)
-    new_state = rk4_step(acrobot_dynamics, 0, x, u, dt)
-    theta1, theta2, omega1, omega2 = new_state
-    
-    # Calculate positions
+    # Get link endpoints for plotting
     x1 = L1 * np.sin(theta1)
     y1 = -L1 * np.cos(theta1)
-    
     x2 = x1 + L2 * np.sin(theta1 + theta2)
     y2 = y1 - L2 * np.cos(theta1 + theta2)
     
-    # Add error checking before setting data
-    if np.isfinite(x1) and np.isfinite(y1) and np.isfinite(x2) and np.isfinite(y2):
-        joint1.set_data([x1], [y1])
-        joint2.set_data([x2], [y2])
-        rod1.set_data([0, x1], [0, y1])
-        rod2.set_data([x1, x2], [y1, y2])
-    else:
-        # If values are invalid, use empty sequences
-        joint1.set_data([], [])
-        joint2.set_data([], [])
-        rod1.set_data([], [])
-        rod2.set_data([], [])
+    # Update lines and joints
+    joint1.set_data([x1], [y1])
+    joint2.set_data([x2], [y2])
+    rod1.set_data([0, x1], [0, y1])
+    rod2.set_data([x1, x2], [y1, y2])
     
     return joint1, joint2, rod1, rod2
 
-# Create animation
-ani = animation.FuncAnimation(fig, update, frames=int(T/dt), 
-                              init_func=init, interval=dt*1000, blit=True)
-
-plt.title("Acrobat (Double Pendulum) System")
+ani = animation.FuncAnimation(
+    fig, update_anim, frames=num_steps,
+    init_func=init_anim, blit=True, interval=dt*1000
+)
 plt.show()
